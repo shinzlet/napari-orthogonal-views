@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from napari.viewer import Viewer
+from scipy.ndimage import affine_transform as scipy_affine_transform
 from qtpy.QtCore import Qt, Signal
 from qtpy.QtWidgets import (
     QHBoxLayout,
@@ -274,7 +275,14 @@ class PointPickerWidget(QWidget):
         return affine_matrix
 
     def _apply_affine(self) -> None:
-        """Apply the estimated affine transform to Image 2 layer."""
+        """Apply the estimated affine transform to Image 2 layer.
+
+        Pre-transforms the image data using scipy rather than setting
+        layer.affine, because napari does not fully support non-orthogonal
+        slicing — off-diagonal affine components (shear/rotation) are
+        stripped in non-displayed dimensions, causing orthoviews to render
+        incorrectly.
+        """
 
         # Check if Image 2 layer exists
         if "Image 2" not in self.viewer.layers:
@@ -282,16 +290,39 @@ class PointPickerWidget(QWidget):
 
         layer = self.viewer.layers["Image 2"]
 
-        # Snapshot current transform if not already done
+        # Snapshot current state if not already done
         if self.transform_snapshot is None:
             self.transform_snapshot = {
-                "affine": layer.affine.affine_matrix.copy()
+                "affine": layer.affine.affine_matrix.copy(),
+                "data": layer.data,
             }
 
-        # Compute and apply new affine
+        # Compute affine
         affine = self._estimate_affine_transform()
         if affine is not None:
-            layer.affine = affine
+            # Pre-transform the data so the layer can keep an identity affine.
+            inv_affine = np.linalg.inv(affine)
+            ndim = affine.shape[0] - 1
+
+            # Use Image 1's shape as output so the result covers the
+            # reference image's coordinate space.
+            if "Image 1" in self.viewer.layers:
+                output_shape = self.viewer.layers["Image 1"].data.shape
+            else:
+                output_shape = self.transform_snapshot["data"].shape
+
+            transformed = scipy_affine_transform(
+                self.transform_snapshot["data"],
+                inv_affine[:ndim, :ndim],
+                offset=inv_affine[:ndim, ndim],
+                output_shape=output_shape,
+                order=1,
+            )
+            layer.data = transformed
+            # Restore original affine (identity in most cases) so no
+            # non-orthogonal slicing occurs.
+            layer.affine = self.transform_snapshot["affine"]
+
             self.affine_applied.emit(affine)
             self._update_button_states()
 
@@ -305,6 +336,7 @@ class PointPickerWidget(QWidget):
             return
 
         layer = self.viewer.layers["Image 2"]
+        layer.data = self.transform_snapshot["data"]
         layer.affine = self.transform_snapshot["affine"]
         self.transform_snapshot = None
         self._update_button_states()

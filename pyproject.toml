@@ -33,6 +33,7 @@ dependencies = [
     "numpy",
     "qtpy",
     "opencv-python",
+    "scipy",
 ]
 
 [project.urls]
