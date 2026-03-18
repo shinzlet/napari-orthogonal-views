@@ -4,5 +4,6 @@ except ImportError:
     __version__ = "unknown"
 
 from .ortho_view_widget import OrthoViewWidget
+from .point_picker_widget import PointPickerWidget
 
-__all__ = ("OrthoViewWidget",)
+__all__ = ("OrthoViewWidget", "PointPickerWidget")

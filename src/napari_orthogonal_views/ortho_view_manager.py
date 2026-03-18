@@ -31,6 +31,7 @@ from napari_orthogonal_views.ortho_view_widget import (
     OrthoViewWidget,
     activate_on_hover,
 )
+from napari_orthogonal_views.point_picker_widget import PointPickerWidget
 from napari_orthogonal_views.screen_recorder_widget import ScreenRecorderWidget
 from napari_orthogonal_views.widget_controls import MainControlsWidget
 
@@ -148,6 +149,9 @@ class OrthoViewManager:
             screenshot_callback=self.screenshot,
             screenrecord_callback=self.screen_record,
         )
+
+        # Point Picker tab will be added when orthoviews are shown
+        self.point_picker_widget = PointPickerWidget(viewer=self.viewer)
 
         # Build orthogonal layout (splitters + widgets)
         self.h_splitter_top = QSplitter(Qt.Horizontal)
@@ -280,6 +284,25 @@ class OrthoViewManager:
 
         return self._shown
 
+    def get_registration_points(self) -> list[dict]:
+        """Return the list of registration point pairs.
+
+        Returns:
+            List of dicts with keys 'pair_id', 'layer1_coords', 'layer2_coords'.
+            Coordinates are tuples of step indices, or None if not yet set.
+        """
+
+        return self.point_picker_widget.get_point_pairs()
+
+    def get_estimated_affine(self) -> np.ndarray | None:
+        """Get the estimated affine transform matrix from point pairs.
+
+        Returns:
+            Homogeneous affine matrix (4x4 for 3D, 3x3 for 2D), or None if < 4 valid pairs.
+        """
+
+        return self.point_picker_widget.get_estimated_affine()
+
     def set_show_orth_views(self, show: bool) -> None:
         """Show or hide ortho views."""
 
@@ -350,6 +373,10 @@ class OrthoViewManager:
             )
             self.update_screen_recorder_axes()
 
+        # Add the point picker tab when showing orthoviews
+        if self.controls_tab.indexOf(self.point_picker_widget) == -1:
+            self.controls_tab.addTab(self.point_picker_widget, "Point Picker")
+
         # assign 30% of window width and height to orth views
         self._set_splitter_sizes(0.3, 0.3)
 
@@ -407,6 +434,11 @@ class OrthoViewManager:
 
         # Remove the screen recorder tab when hiding orthoviews
         tab_index = self.controls_tab.indexOf(self.screen_recorder_widget)
+        if tab_index != -1:
+            self.controls_tab.removeTab(tab_index)
+
+        # Remove the point picker tab when hiding orthoviews
+        tab_index = self.controls_tab.indexOf(self.point_picker_widget)
         if tab_index != -1:
             self.controls_tab.removeTab(tab_index)
 
@@ -679,6 +711,7 @@ class OrthoViewManager:
             self.bottom_widget,
             self.main_controls_widget,
             self.screen_recorder_widget,
+            self.point_picker_widget,
             getattr(self, "h_splitter_top", None),
             getattr(self, "h_splitter_bottom", None),
             getattr(self, "v_splitter", None),
