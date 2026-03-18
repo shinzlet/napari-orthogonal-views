@@ -16,11 +16,12 @@ sys.path.insert(0, str(src_path))
 import napari_orthogonal_views
 
 # Create two 3D demo images
-r = 4
+r = 2
 r2 = r ** r
+N = 100
 
 # Image 1: 3D gaussian blobs
-shape = (100, 300, 300)
+shape = (200, 500, 500)
 image1 = np.zeros(shape)
 
 # Image 2: Similar but slightly shifted/transformed
@@ -30,7 +31,7 @@ image2 = np.zeros(shape)
 blob_centers_img1 = []
 blob_centers_img2 = []
 
-for _ in range(40):
+for _ in range(N):
     z = np.random.randint(2 * r, shape[0] - 2 * r)
     y = np.random.randint(2 * r, shape[1] - 2 * r)
     x = np.random.randint(2 * r, shape[2] - 2 * r)
@@ -51,7 +52,7 @@ for _ in range(40):
 # Create shear matrix (small shear in y-x plane)
 shear_matrix = np.array([
     [1.0, 0.0, 0.0],
-    [0.01, 1.0, 0.05],
+    [0.01, 1.0, 0.15],
     [0.0, 0.05, 1.0]
 ])
 
