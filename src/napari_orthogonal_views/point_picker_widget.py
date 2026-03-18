@@ -57,6 +57,7 @@ class PointPickerWidget(QWidget):
         self.point_pairs: dict[int, PointPair] = {}  # Use dict for stable pair_id lookup
         self._next_pair_id = 0
         self.transform_snapshot: dict | None = None
+        self._applied_affine: np.ndarray | None = None
 
         # Create table
         self.table = QTableWidget()
@@ -92,6 +93,15 @@ class PointPickerWidget(QWidget):
         layout.addWidget(self.add_button)
         layout.addLayout(button_layout)
         self.setLayout(layout)
+
+    def _transform_coords(self, coords: tuple, affine: np.ndarray) -> tuple:
+        """Apply a homogeneous affine matrix to step-index coordinates."""
+        ndim = affine.shape[0] - 1
+        p = np.array(coords[:ndim], dtype=float)
+        transformed = affine[:ndim, :ndim] @ p + affine[:ndim, ndim]
+        result = list(coords)  # preserve any extra dims unchanged
+        result[:ndim] = np.round(transformed).astype(int).tolist()
+        return tuple(result)
 
     def add_pair(self) -> None:
         """Add a new point pair row to the table."""
@@ -157,6 +167,9 @@ class PointPickerWidget(QWidget):
             # No coordinate saved yet, default to origin
             coords = tuple([0] * self.viewer.dims.ndim)
 
+        if layer == "layer2" and self._applied_affine is not None:
+            coords = self._transform_coords(coords, self._applied_affine)
+
         self.viewer.dims.current_step = coords
 
     def _update_coordinate(self, pair_id: int, layer: str) -> None:
@@ -166,6 +179,11 @@ class PointPickerWidget(QWidget):
             return
 
         current_coords = tuple(self.viewer.dims.current_step)
+
+        if layer == "layer2" and self._applied_affine is not None:
+            inv = np.linalg.inv(self._applied_affine)
+            current_coords = self._transform_coords(current_coords, inv)
+
         point_pair = self.point_pairs[pair_id]
 
         if layer == "layer1":
@@ -323,6 +341,7 @@ class PointPickerWidget(QWidget):
             # non-orthogonal slicing occurs.
             layer.affine = self.transform_snapshot["affine"]
 
+            self._applied_affine = affine
             self.affine_applied.emit(affine)
             self._update_button_states()
 
@@ -339,6 +358,7 @@ class PointPickerWidget(QWidget):
         layer.data = self.transform_snapshot["data"]
         layer.affine = self.transform_snapshot["affine"]
         self.transform_snapshot = None
+        self._applied_affine = None
         self._update_button_states()
 
     def get_estimated_affine(self) -> np.ndarray | None:

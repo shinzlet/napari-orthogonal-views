@@ -16,12 +16,11 @@ sys.path.insert(0, str(src_path))
 import napari_orthogonal_views
 
 # Create two 3D demo images
-r = 2
-r2 = r ** r
+stddev = 1
 N = 100
 
 # Image 1: 3D gaussian blobs
-shape = (200, 500, 500)
+shape = (200, 200, 200)
 image1 = np.zeros(shape)
 
 # Image 2: Similar but slightly shifted/transformed
@@ -32,27 +31,25 @@ blob_centers_img1 = []
 blob_centers_img2 = []
 
 for _ in range(N):
-    z = np.random.randint(2 * r, shape[0] - 2 * r)
-    y = np.random.randint(2 * r, shape[1] - 2 * r)
-    x = np.random.randint(2 * r, shape[2] - 2 * r)
+    z = np.random.randint(3 * stddev, shape[0] - 3 * stddev)
+    y = np.random.randint(3 * stddev, shape[1] - 3 * stddev)
+    x = np.random.randint(3 * stddev, shape[2] - 3 * stddev)
     zz, yy, xx = np.ogrid[:shape[0], :shape[1], :shape[2]]
+    rr2 = (zz - z)**2 + (yy - y)**2 + (xx - x)**2
 
     # Add blobs in image 1
-    mask = ((zz - z)**2 / r2 + (yy - y)**2 / r2 + (xx - x)**2 / r2) < 1
-    image1[mask] = np.random.uniform(0.5, 1.0)
+    spot = np.exp(-rr2 / (2 * stddev ** 2))
+    image1 += np.random.uniform(0.5, 1.0) * spot
     blob_centers_img1.append((z, y, x))
 
     # Add the similar blobs in image 2 (before shear transform)
-    z2, y2, x2 = z - 2, y + 3, x - 5  # shifted positions
-    mask = ((zz - z2)**2 / r2 + (yy - y2)**2 / r2 + (xx - x2)**2 / r2) < 1
-    image2[mask] = np.random.uniform(0.5, 1.0)
-    blob_centers_img2.append((z2, y2, x2))
+    image2 += np.random.uniform(0.5, 1.0) * spot
+    blob_centers_img2.append((z, y, x))
 
 # Apply a small shear transformation to image2 to make registration more realistic
-# Create shear matrix (small shear in y-x plane)
 shear_matrix = np.array([
     [1.0, 0.0, 0.0],
-    [0.01, 1.0, 0.15],
+    [0.02, 1.0, 0.05],
     [0.0, 0.05, 1.0]
 ])
 
