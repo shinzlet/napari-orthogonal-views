@@ -45,6 +45,56 @@ class ShowUpdateWidget(QWidget):
         self.setLayout(layout)
 
 
+def estimate_affine_from_points(
+    source_points: np.ndarray, target_points: np.ndarray
+) -> np.ndarray:
+    """Estimate an affine transform from matched point pairs using least squares.
+
+    Parameters
+    ----------
+    source_points : np.ndarray
+        (N, ndim) array of source coordinates.
+    target_points : np.ndarray
+        (N, ndim) array of target coordinates.
+
+    Returns
+    -------
+    np.ndarray
+        (ndim+1, ndim+1) homogeneous affine matrix.
+
+    Raises
+    ------
+    ValueError
+        If fewer than ndim+1 point pairs are provided.
+    """
+    source_points = np.asarray(source_points)
+    target_points = np.asarray(target_points)
+
+    if source_points.ndim != 2 or target_points.ndim != 2:
+        raise ValueError("Point arrays must be 2-dimensional (N, ndim).")
+    if source_points.shape != target_points.shape:
+        raise ValueError("Source and target point arrays must have the same shape.")
+
+    n, ndim = source_points.shape
+    if n < ndim + 1:
+        raise ValueError(
+            f"Need at least {ndim + 1} point pairs for {ndim}D affine estimation, "
+            f"got {n}."
+        )
+
+    # Add homogeneous coordinate
+    src_homo = np.hstack([source_points, np.ones((n, 1))])
+
+    # Solve least squares: tgt = src_homo @ T.T
+    T, _, _, _ = np.linalg.lstsq(src_homo, target_points, rcond=None)
+
+    # Build full homogeneous matrix
+    affine_matrix = np.eye(ndim + 1)
+    affine_matrix[:ndim, :] = T.T
+
+    return affine_matrix
+
+
 class PointPickerWidget(QWidget):
     """Widget for picking matched point pairs across two image layers."""
 
@@ -58,6 +108,7 @@ class PointPickerWidget(QWidget):
         self._next_pair_id = 0
         self.transform_snapshot: dict | None = None
         self._applied_affine: np.ndarray | None = None
+        self._padding: np.ndarray | None = None
 
         # Create table
         self.table = QTableWidget()
@@ -213,8 +264,19 @@ class PointPickerWidget(QWidget):
         # Update button states
         self._update_button_states()
 
+    def _unpad_coords(self, coords: tuple | None) -> tuple | None:
+        """Subtract padding offset from coordinates if padding is active."""
+        if coords is None or self._padding is None:
+            return coords
+        arr = np.array(coords)
+        arr[: len(self._padding)] -= self._padding
+        return tuple(arr.tolist())
+
     def get_point_pairs(self) -> list[dict]:
         """Return the list of point pairs as dictionaries.
+
+        When padding has been applied, coordinates are returned in the
+        original (unpadded) coordinate space.
 
         Returns:
             List of dicts with keys 'pair_id', 'layer1_coords', 'layer2_coords'
@@ -223,8 +285,8 @@ class PointPickerWidget(QWidget):
         return [
             {
                 "pair_id": pair.pair_id,
-                "layer1_coords": pair.layer1_coords,
-                "layer2_coords": pair.layer2_coords,
+                "layer1_coords": self._unpad_coords(pair.layer1_coords),
+                "layer2_coords": self._unpad_coords(pair.layer2_coords),
             }
             for pair in self.point_pairs.values()
         ]
@@ -235,6 +297,31 @@ class PointPickerWidget(QWidget):
         self.point_pairs.clear()
         self.table.setRowCount(0)
         self._next_pair_id = 0
+
+    def apply_padding(self, fraction: float) -> None:
+        """Pad both image layers with zeros so affine transforms have room to work.
+
+        Parameters
+        ----------
+        fraction : float
+            Fraction of the (element-wise) maximum shape to pad on each side.
+        """
+        if "Image 1" not in self.viewer.layers or "Image 2" not in self.viewer.layers:
+            return
+
+        layer1 = self.viewer.layers["Image 1"]
+        layer2 = self.viewer.layers["Image 2"]
+
+        shape1 = np.array(layer1.data.shape)
+        shape2 = np.array(layer2.data.shape)
+        pad_amounts = np.maximum(shape1, shape2) * fraction
+        pad_amounts = np.round(pad_amounts).astype(int)
+
+        pad_width = [(p, p) for p in pad_amounts]
+        layer1.data = np.pad(layer1.data, pad_width, mode="constant")
+        layer2.data = np.pad(layer2.data, pad_width, mode="constant")
+
+        self._padding = pad_amounts
 
     def _update_button_states(self) -> None:
         """Update the enabled state of the Apply and Reset buttons."""
@@ -269,28 +356,13 @@ class PointPickerWidget(QWidget):
         if len(valid_pairs) < 4:
             return None
 
-        n = len(valid_pairs)
-        ndim = len(valid_pairs[0].layer1_coords)
-
-        # Build source and target point matrices
         # We want to transform Image 2 to match Image 1, so:
         # - Source points are from Image 2 (layer2_coords)
         # - Target points are from Image 1 (layer1_coords)
-        src_pts = np.array([p.layer2_coords for p in valid_pairs])  # Image 2 points
-        tgt_pts = np.array([p.layer1_coords for p in valid_pairs])  # Image 1 points
+        src_pts = np.array([p.layer2_coords for p in valid_pairs])
+        tgt_pts = np.array([p.layer1_coords for p in valid_pairs])
 
-        # Add homogeneous coordinate to source points
-        src_homo = np.hstack([src_pts, np.ones((n, 1))])
-
-        # Solve least squares: tgt = src_homo @ T.T
-        # We solve for T.T because napari uses row vectors
-        T, residuals, rank, s = np.linalg.lstsq(src_homo, tgt_pts, rcond=None)
-
-        # Build full homogeneous matrix
-        affine_matrix = np.eye(ndim + 1)
-        affine_matrix[:ndim, :] = T.T
-
-        return affine_matrix
+        return estimate_affine_from_points(src_pts, tgt_pts)
 
     def _apply_affine(self) -> None:
         """Apply the estimated affine transform to Image 2 layer.
@@ -364,8 +436,25 @@ class PointPickerWidget(QWidget):
     def get_estimated_affine(self) -> np.ndarray | None:
         """Get the estimated affine transform matrix.
 
+        When padding has been applied, the affine is conjugated so that it
+        operates in the original (unpadded) coordinate space.
+
         Returns:
             Homogeneous affine matrix or None if insufficient valid pairs.
         """
 
-        return self._estimate_affine_transform()
+        affine = self._estimate_affine_transform()
+        if affine is None or self._padding is None:
+            return affine
+
+        ndim = affine.shape[0] - 1
+        pad = self._padding[:ndim].astype(float)
+
+        # T_neg translates by -padding, T_pos by +padding
+        T_neg = np.eye(ndim + 1)
+        T_neg[:ndim, ndim] = -pad
+
+        T_pos = np.eye(ndim + 1)
+        T_pos[:ndim, ndim] = pad
+
+        return T_neg @ affine @ T_pos
