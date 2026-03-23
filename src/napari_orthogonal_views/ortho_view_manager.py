@@ -202,14 +202,12 @@ class OrthoViewManager:
             show_warning(
                 "Blending of labels layers may not display correctly. You may have to set blending to 'translucent_no_depth' manually for new layers. To ensure correct blending of layers in the main viewer, call OrthoViewManager before adding layers to the viewer."
             )
-            for (
-                _,
-                value,
-            ) in self._original_qt_viewer.canvas.layer_to_visual.items():
-                value.node.set_gl_state(blend=True, depth_test=False)
             for layer in self.viewer.layers:
                 if layer.blending == "translucent":
                     layer.blending = "translucent_no_depth"
+                    visual = self._original_qt_viewer.canvas.layer_to_visual.get(layer)
+                    if visual is not None:
+                        visual.node.set_gl_state(blend=True, depth_test=False)
 
         self._container = container
 
