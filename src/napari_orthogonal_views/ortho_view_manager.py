@@ -208,7 +208,8 @@ class OrthoViewManager:
             ) in self._original_qt_viewer.canvas.layer_to_visual.items():
                 value.node.set_gl_state(blend=True, depth_test=False)
             for layer in self.viewer.layers:
-                layer.blending = "translucent_no_depth"
+                if layer.blending == "translucent":
+                    layer.blending = "translucent_no_depth"
 
         self._container = container
 
