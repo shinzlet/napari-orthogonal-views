@@ -5,6 +5,7 @@ from napari.viewer import Viewer
 from scipy.ndimage import affine_transform as scipy_affine_transform
 from qtpy.QtCore import Qt, Signal
 from qtpy.QtWidgets import (
+    QCheckBox,
     QHBoxLayout,
     QPushButton,
     QTableWidget,
@@ -401,14 +402,16 @@ class PointPickerWidget(QWidget):
             else:
                 output_shape = self.transform_snapshot["data"].shape
 
+            target_dtype = self.transform_snapshot["data"].dtype
             transformed = scipy_affine_transform(
-                self.transform_snapshot["data"],
+                # Affine only works on float data, but we convert back after
+                self.transform_snapshot["data"].astype(np.float32),
                 inv_affine[:ndim, :ndim],
                 offset=inv_affine[:ndim, ndim],
                 output_shape=output_shape,
                 order=1,
             )
-            layer.data = transformed
+            layer.data = transformed.astype(target_dtype)
             # Restore original affine (identity in most cases) so no
             # non-orthogonal slicing occurs.
             layer.affine = self.transform_snapshot["affine"]
