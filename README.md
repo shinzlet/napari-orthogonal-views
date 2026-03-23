@@ -20,7 +20,7 @@ This plugin builds on the upstream [napari-orthogonal-views](https://github.com/
 ## Installation
 
 ```
-pip install git+https://github.com/AnniekStok/napari-orthogonal-views.git
+uv add https://github.com/shinzlet/napari-orthogonal-views.git
 ```
 
 ## Point picker & affine registration
