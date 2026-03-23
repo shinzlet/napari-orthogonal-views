@@ -84,8 +84,10 @@ class OrthoViewManager:
      QMainWindow geometry is preserved.
     """
 
-    def __init__(self, viewer: Viewer):
+    def __init__(self, viewer: Viewer, layer1_name: str = "Image 1", layer2_name: str = "Image 2"):
         self.viewer = viewer
+        self.layer1_name = layer1_name
+        self.layer2_name = layer2_name
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             self.main_window = viewer.window._qt_window
@@ -151,7 +153,11 @@ class OrthoViewManager:
         )
 
         # Point Picker tab will be added when orthoviews are shown
-        self.point_picker_widget = PointPickerWidget(viewer=self.viewer)
+        self.point_picker_widget = PointPickerWidget(
+            viewer=self.viewer,
+            layer1_name=self.layer1_name,
+            layer2_name=self.layer2_name,
+        )
 
         # Build orthogonal layout (splitters + widgets)
         self.h_splitter_top = QSplitter(Qt.Horizontal)
@@ -284,15 +290,24 @@ class OrthoViewManager:
 
         return self._shown
 
-    def get_registration_points(self) -> list[dict]:
-        """Return the list of registration point pairs.
+    def get_registration_points(self) -> dict:
+        """Return registration point pairs.
 
         Returns:
-            List of dicts with keys 'pair_id', 'layer1_coords', 'layer2_coords'.
-            Coordinates are tuples of step indices, or None if not yet set.
+            Dict keyed by layer name, each a list of (z, y, x) tuples.
         """
-
         return self.point_picker_widget.get_point_pairs()
+
+    def load_registration_points(self, pairs: dict) -> None:
+        """Load registration point pairs into the point picker widget.
+
+        Parameters
+        ----------
+        pairs : dict
+            Dict keyed by layer name, each a list of (z, y, x) tuples.
+            Matches the format returned by ``get_registration_points()``.
+        """
+        self.point_picker_widget.load_point_pairs(pairs)
 
     def get_estimated_affine(self) -> np.ndarray | None:
         """Get the estimated affine transform matrix from point pairs.
@@ -737,11 +752,11 @@ class OrthoViewManager:
 _VIEWER_MANAGERS = weakref.WeakKeyDictionary()
 
 
-def _get_manager(viewer: Viewer) -> OrthoViewManager:
+def _get_manager(viewer: Viewer, **kwargs) -> OrthoViewManager:
     """Return reference to OrthoViewManager"""
 
     if viewer not in _VIEWER_MANAGERS:
-        _VIEWER_MANAGERS[viewer] = OrthoViewManager(viewer)
+        _VIEWER_MANAGERS[viewer] = OrthoViewManager(viewer, **kwargs)
     return _VIEWER_MANAGERS[viewer]
 
 
@@ -767,6 +782,46 @@ def toggle_orthogonal_views(viewer: Viewer) -> None:
         QTimer.singleShot(0, m.hide)
     else:
         QTimer.singleShot(0, m.show)
+
+
+def show_point_picker(
+    viewer: Viewer,
+    layer1_name: str = "Image 1",
+    layer2_name: str = "Image 2",
+) -> OrthoViewManager:
+    """Show orthogonal views with the Point Picker tab active.
+
+    Convenience function for scripts that want to launch straight into
+    point-picking mode after loading data. Enables crosshairs, sync zoom,
+    and sync center by default.
+
+    Parameters
+    ----------
+    viewer : Viewer
+        The napari viewer instance (must already have layers added).
+    layer1_name : str
+        Name of the reference image layer.
+    layer2_name : str
+        Name of the moving image layer.
+
+    Returns
+    -------
+    OrthoViewManager
+        The manager instance, for further programmatic access.
+    """
+    m = _get_manager(viewer, layer1_name=layer1_name, layer2_name=layer2_name)
+
+    def _activate():
+        m.show()
+        m.set_cross_hairs(True)
+        m.set_zoom_sync(True)
+        m.set_center_sync(True)
+        idx = m.controls_tab.indexOf(m.point_picker_widget)
+        if idx >= 0:
+            m.controls_tab.setCurrentIndex(idx)
+
+    QTimer.singleShot(0, _activate)
+    return m
 
 
 def delete_and_cleanup(viewer: Viewer) -> None:

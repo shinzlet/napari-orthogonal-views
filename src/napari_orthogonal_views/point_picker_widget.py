@@ -96,15 +96,76 @@ def estimate_affine_from_points(
     return affine_matrix
 
 
+def estimate_affine_no_scaling(
+    source_points: np.ndarray, target_points: np.ndarray
+) -> np.ndarray:
+    """Estimate an affine transform without scaling (diagonal of linear part fixed to 1).
+
+    Solves constrained least squares column-by-column. For each target dimension j,
+    the coefficient T[j,j] (the scale along axis j) is fixed to 1 and the remaining
+    coefficients (off-diagonal shear/rotation + translation) are optimized.
+
+    Parameters
+    ----------
+    source_points : np.ndarray
+        (N, ndim) array of source coordinates.
+    target_points : np.ndarray
+        (N, ndim) array of target coordinates.
+
+    Returns
+    -------
+    np.ndarray
+        (ndim+1, ndim+1) homogeneous affine matrix with ones on the linear diagonal.
+    """
+    source_points = np.asarray(source_points)
+    target_points = np.asarray(target_points)
+
+    if source_points.ndim != 2 or target_points.ndim != 2:
+        raise ValueError("Point arrays must be 2-dimensional (N, ndim).")
+    if source_points.shape != target_points.shape:
+        raise ValueError("Source and target point arrays must have the same shape.")
+
+    n, ndim = source_points.shape
+    if n < ndim + 1:
+        raise ValueError(
+            f"Need at least {ndim + 1} point pairs for {ndim}D affine estimation, "
+            f"got {n}."
+        )
+
+    src_homo = np.hstack([source_points, np.ones((n, 1))])
+    affine_matrix = np.eye(ndim + 1)
+
+    for j in range(ndim):
+        # Move the known diagonal contribution (1 * source_j) to the RHS
+        rhs = target_points[:, j] - source_points[:, j]
+
+        # Solve for all coefficients except the diagonal one
+        other_cols = [i for i in range(ndim + 1) if i != j]
+        lhs = src_homo[:, other_cols]
+
+        coeffs, _, _, _ = np.linalg.lstsq(lhs, rhs, rcond=None)
+
+        # affine_matrix[j, j] is already 1 from np.eye
+        for k, col_idx in enumerate(other_cols):
+            if col_idx < ndim:
+                affine_matrix[j, col_idx] = coeffs[k]
+            else:
+                affine_matrix[j, ndim] = coeffs[k]  # translation
+
+    return affine_matrix
+
+
 class PointPickerWidget(QWidget):
     """Widget for picking matched point pairs across two image layers."""
 
     affine_applied = Signal(np.ndarray)
 
-    def __init__(self, viewer: Viewer):
+    def __init__(self, viewer: Viewer, layer1_name: str = "Image 1", layer2_name: str = "Image 2"):
         super().__init__()
 
         self.viewer = viewer
+        self.layer1_name = layer1_name
+        self.layer2_name = layer2_name
         self.point_pairs: dict[int, PointPair] = {}  # Use dict for stable pair_id lookup
         self._next_pair_id = 0
         self.transform_snapshot: dict | None = None
@@ -114,7 +175,7 @@ class PointPickerWidget(QWidget):
         # Create table
         self.table = QTableWidget()
         self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["Pair", "Image 1", "Image 2", ""])
+        self.table.setHorizontalHeaderLabels(["Pair", layer1_name, layer2_name, ""])
         self.table.horizontalHeader().setStretchLastSection(False)
         self.table.setColumnWidth(0, 80)
         self.table.setColumnWidth(1, 150)
@@ -134,6 +195,10 @@ class PointPickerWidget(QWidget):
         self.reset_button.clicked.connect(self._reset_transform)
         self.reset_button.setEnabled(False)
 
+        # Scaling checkbox
+        self.allow_scaling_checkbox = QCheckBox("Allow scaling")
+        self.allow_scaling_checkbox.setChecked(False)
+
         # Button layout
         button_layout = QHBoxLayout()
         button_layout.addWidget(self.apply_button)
@@ -143,6 +208,7 @@ class PointPickerWidget(QWidget):
         layout = QVBoxLayout()
         layout.addWidget(self.table)
         layout.addWidget(self.add_button)
+        layout.addWidget(self.allow_scaling_checkbox)
         layout.addLayout(button_layout)
         self.setLayout(layout)
 
@@ -173,7 +239,7 @@ class PointPickerWidget(QWidget):
         pair_item.setData(Qt.UserRole, pair_id)  # Store pair_id in the item
         self.table.setItem(row, 0, pair_item)
 
-        # Column 1: Image 1 show/update widget
+        # Column 1: fixed layer show/update widget
         layer1_widget = ShowUpdateWidget()
         layer1_widget.show_clicked.connect(
             lambda pid=pair_id: self._show_coordinate(pid, "layer1")
@@ -183,7 +249,7 @@ class PointPickerWidget(QWidget):
         )
         self.table.setCellWidget(row, 1, layer1_widget)
 
-        # Column 2: Image 2 show/update widget
+        # Column 2: moving layer show/update widget
         layer2_widget = ShowUpdateWidget()
         layer2_widget.show_clicked.connect(
             lambda pid=pair_id: self._show_coordinate(pid, "layer2")
@@ -196,7 +262,7 @@ class PointPickerWidget(QWidget):
         # Column 3: Delete button
         delete_button = QPushButton("×")
         delete_button.setMaximumWidth(30)
-        delete_button.clicked.connect(lambda pid=pair_id: self._delete_pair(pid))
+        delete_button.clicked.connect(lambda checked, pid=pair_id: self._delete_pair(pid))
         self.table.setCellWidget(row, 3, delete_button)
 
         # Update button states
@@ -273,24 +339,23 @@ class PointPickerWidget(QWidget):
         arr[: len(self._padding)] -= self._padding
         return tuple(arr.tolist())
 
-    def get_point_pairs(self) -> list[dict]:
-        """Return the list of point pairs as dictionaries.
+    def get_point_pairs(self) -> dict:
+        """Return point pairs as two parallel coordinate lists.
 
         When padding has been applied, coordinates are returned in the
         original (unpadded) coordinate space.
 
         Returns:
-            List of dicts with keys 'pair_id', 'layer1_coords', 'layer2_coords'
+            Dict keyed by layer name, each a list of (z, y, x) tuples.
+            Only pairs where both coordinates are set are included.
         """
-
-        return [
-            {
-                "pair_id": pair.pair_id,
-                "layer1_coords": self._unpad_coords(pair.layer1_coords),
-                "layer2_coords": self._unpad_coords(pair.layer2_coords),
-            }
-            for pair in self.point_pairs.values()
-        ]
+        layer1 = []
+        layer2 = []
+        for pair in self.point_pairs.values():
+            if pair.layer1_coords is not None and pair.layer2_coords is not None:
+                layer1.append(self._unpad_coords(pair.layer1_coords))
+                layer2.append(self._unpad_coords(pair.layer2_coords))
+        return {self.layer1_name: layer1, self.layer2_name: layer2}
 
     def clear_pairs(self) -> None:
         """Clear all point pairs."""
@@ -298,6 +363,24 @@ class PointPickerWidget(QWidget):
         self.point_pairs.clear()
         self.table.setRowCount(0)
         self._next_pair_id = 0
+
+    def load_point_pairs(self, pairs: dict) -> None:
+        """Load point pairs into the widget.
+
+        Parameters
+        ----------
+        pairs : dict
+            Dict keyed by layer name, each a list of (z, y, x) coordinate
+            tuples. Matches the format returned by ``get_point_pairs()``.
+        """
+        self.clear_pairs()
+        for l1, l2 in zip(pairs[self.layer1_name], pairs[self.layer2_name]):
+            self.add_pair()
+            pair_id = self._next_pair_id - 1
+            point_pair = self.point_pairs[pair_id]
+            point_pair.layer1_coords = tuple(l1)
+            point_pair.layer2_coords = tuple(l2)
+        self._update_button_states()
 
     def apply_padding(self, fraction: float) -> None:
         """Pad both image layers with zeros so affine transforms have room to work.
@@ -307,11 +390,11 @@ class PointPickerWidget(QWidget):
         fraction : float
             Fraction of the (element-wise) maximum shape to pad on each side.
         """
-        if "Image 1" not in self.viewer.layers or "Image 2" not in self.viewer.layers:
+        if self.layer1_name not in self.viewer.layers or self.layer2_name not in self.viewer.layers:
             return
 
-        layer1 = self.viewer.layers["Image 1"]
-        layer2 = self.viewer.layers["Image 2"]
+        layer1 = self.viewer.layers[self.layer1_name]
+        layer2 = self.viewer.layers[self.layer2_name]
 
         shape1 = np.array(layer1.data.shape)
         shape2 = np.array(layer2.data.shape)
@@ -357,16 +440,21 @@ class PointPickerWidget(QWidget):
         if len(valid_pairs) < 4:
             return None
 
-        # We want to transform Image 2 to match Image 1, so:
-        # - Source points are from Image 2 (layer2_coords)
-        # - Target points are from Image 1 (layer1_coords)
+        # Transform the moving layer to match the fixed layer:
+        # - Source points are from the moving layer (layer2_coords)
+        # - Target points are from the fixed layer (layer1_coords)
         src_pts = np.array([p.layer2_coords for p in valid_pairs])
         tgt_pts = np.array([p.layer1_coords for p in valid_pairs])
 
-        return estimate_affine_from_points(src_pts, tgt_pts)
+        if self.allow_scaling_checkbox.isChecked():
+            affine = estimate_affine_from_points(src_pts, tgt_pts)
+        else:
+            affine = estimate_affine_no_scaling(src_pts, tgt_pts)
+
+        return affine
 
     def _apply_affine(self) -> None:
-        """Apply the estimated affine transform to Image 2 layer.
+        """Apply the estimated affine transform to the moving layer.
 
         Pre-transforms the image data using scipy rather than setting
         layer.affine, because napari does not fully support non-orthogonal
@@ -375,11 +463,11 @@ class PointPickerWidget(QWidget):
         incorrectly.
         """
 
-        # Check if Image 2 layer exists
-        if "Image 2" not in self.viewer.layers:
+        # Check if target layer exists
+        if self.layer2_name not in self.viewer.layers:
             return
 
-        layer = self.viewer.layers["Image 2"]
+        layer = self.viewer.layers[self.layer2_name]
 
         # Snapshot current state if not already done
         if self.transform_snapshot is None:
@@ -395,10 +483,10 @@ class PointPickerWidget(QWidget):
             inv_affine = np.linalg.inv(affine)
             ndim = affine.shape[0] - 1
 
-            # Use Image 1's shape as output so the result covers the
-            # reference image's coordinate space.
-            if "Image 1" in self.viewer.layers:
-                output_shape = self.viewer.layers["Image 1"].data.shape
+            # Use the fixed layer's shape as output so the result covers
+            # the reference image's coordinate space.
+            if self.layer1_name in self.viewer.layers:
+                output_shape = self.viewer.layers[self.layer1_name].data.shape
             else:
                 output_shape = self.transform_snapshot["data"].shape
 
@@ -421,15 +509,15 @@ class PointPickerWidget(QWidget):
             self._update_button_states()
 
     def _reset_transform(self) -> None:
-        """Reset the transform of Image 2 layer to the snapshot state."""
+        """Reset the transform of the moving layer to the snapshot state."""
 
         if self.transform_snapshot is None:
             return
 
-        if "Image 2" not in self.viewer.layers:
+        if self.layer2_name not in self.viewer.layers:
             return
 
-        layer = self.viewer.layers["Image 2"]
+        layer = self.viewer.layers[self.layer2_name]
         layer.data = self.transform_snapshot["data"]
         layer.affine = self.transform_snapshot["affine"]
         self.transform_snapshot = None

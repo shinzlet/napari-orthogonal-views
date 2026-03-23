@@ -9,99 +9,109 @@
 [![npe2](https://img.shields.io/badge/plugin-npe2-blue?link=https://napari.org/stable/plugins/index.html)](https://napari.org/stable/plugins/index.html)
 [![Copier](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/copier-org/copier/master/img/badge/badge-grayscale-inverted-border-purple.json)](https://github.com/copier-org/copier)
 
-A napari plugin for dynamically displaying orthogonal views and syncing events between the different viewers.
+A napari plugin for orthogonal views with synced events, crosshairs, and **interactive point-based affine registration** between two image layers.
 
 ----------------------------------
 
-This [napari] plugin was generated with [copier] using the [napari-plugin-template].
-
 ![orthoviews](https://github.com/user-attachments/assets/9d1ea326-866d-4af7-9ea6-8e56046cf6f2)
 
-<!--
-Don't miss the full getting started guide to set up your new package:
-https://github.com/napari/napari-plugin-template#getting-started
-
-and review the napari docs for plugin developers:
-https://napari.org/stable/plugins/index.html
--->
-
-This plugin is based on this [example](https://napari.org/dev/gallery/multiple_viewer_widget.html), with extra display and synchronization functionalities. The crosshair overlay is based on [this](https://github.com/napari/napari/pull/8017) and [this](https://github.com/napari/napari/blob/9d0c449553eaf1acc3be1bf9bc0c8b3eec05afc6/examples/dev/overlays.py) example.
+This plugin builds on the upstream [napari-orthogonal-views](https://github.com/AnniekStok/napari-orthogonal-views) by adding a **point picker** for manually selecting matched landmarks across two image layers and computing an affine transform to align them. The orthogonal views, crosshairs, and syncing infrastructure come from the original plugin; the registration workflow is the main addition.
 
 ## Installation
-
-You can install the latest development version of `napari-orthogonal-views` via [pip]:
 
 ```
 pip install git+https://github.com/AnniekStok/napari-orthogonal-views.git
 ```
-## Usage
-This plugin is not discoverable as a widget, but commands are available in Views>Commands Palette (CMD+SHIFT+P):
+
+## Point picker & affine registration
+
+The quickest way to get started is `show_point_picker`, which opens orthogonal views with crosshairs, zoom sync, and center sync enabled, and switches to the Point Picker tab:
+
+```python
+import napari
+from napari_orthogonal_views import show_point_picker
+
+viewer = napari.Viewer()
+viewer.add_image(fixed, name="Fixed", colormap="green", blending="additive")
+viewer.add_image(moving, name="Moving", colormap="magenta", blending="additive")
+
+manager = show_point_picker(viewer, layer1_name="Fixed", layer2_name="Moving")
+```
+
+### Workflow
+
+1. Click **Add new pair** to create a new correspondence row.
+2. Navigate to a feature in the fixed image using the orthogonal views.
+3. Press **T** to snap the crosshair to your mouse position.
+4. Click **Update** in the fixed-image column to save that coordinate.
+5. Find the same feature in the moving image and click **Update** in the moving-image column.
+6. Repeat until you have at least 4 pairs (more is better).
+7. Click **Apply Estimated Affine** to transform the moving image to match the fixed image.
+
+### Programmatic access
+
+```python
+# Retrieve point pairs (dict keyed by layer name)
+pairs = manager.get_registration_points()
+# {"Fixed": [(z,y,x), ...], "Moving": [(z,y,x), ...]}
+
+# Get the estimated affine matrix (4x4 homogeneous for 3D)
+affine = manager.get_estimated_affine()
+
+# Load previously saved point pairs
+manager.load_registration_points(pairs)
+```
+
+See `demo_point_picker.py` for a complete runnable example with synthetic data.
+
+## Orthogonal views
+
+Commands are available in Views > Commands Palette (Cmd+Shift+P):
   - Show Orthogonal Views
   - Hide Orthogonal Views
   - Toggle Orthogonal Views
   - Remove Orthogonal Views
 
-Once shown, it can also be popped up or collapsed using the checkbox in the bottom right corner 'Show orthogonal views'.
-Alternatively, you can show the orthogonal views via the console:
+Or from the console:
 
-```
+```python
 from napari_orthogonal_views.ortho_view_manager import show_orthogonal_views
 show_orthogonal_views(viewer)
 ```
 
-And access the OrthoViewManager via _get_manager:
+The view panes can be resized by dragging the splitter handles. Pressing **T** centers all views on the mouse position. All events (including label painting) are synced across views via a shared data array.
 
-```
-from napari_orthogonal_views.ortho_view_manager import _get_manager
-m = _get_manager(viewer)
-m.is_shown()
-Out[6]: True
-```
+### Syncing properties
 
-The size of the orthogonal view windows can be adjusted by clicking and dragging the small dot in between the views, optionally one or two views can be hidden entirely. The checkboxes in the bottom right corner can be used to show the crosshair overlay or for more control over camera zoom and axis center syncing.
-Pressing `T` on the keyboard will center all views to the current mouse location.
+By default all layer properties are synced. For finer control, call `set_sync_filters` *before* showing orthoviews:
 
-By default, all events (including label editing such as painting) are synced across all views. The different views share the same underlying data array and undo/redo history.
-
-## Syncing properties
-By default, all layer properties should be synced between the layer on the main viewer and the orthoviews. However, it is possible to have more finegrained control over the synced properties via the `set_sync_filters` function, as long as it is specified *before* the orthogonal views are activated.
-
-For example, to disable syncing of all properties on Tracks layers and specifically the contour property on Labels layers:
-
-```
+```python
 from napari_orthogonal_views.ortho_view_manager import _get_manager
 from napari.layers import Tracks, Labels
+
 m = _get_manager(viewer)
-sync_filters = {
-    Tracks: {
-        "forward_exclude": "*",  # disable all forward sync
-        "reverse_exclude": "*",  # disable all reverse sync
-    },
-    Labels: {
-        "forward_exclude": "contour" # exclude contour from forward syncing
-    },
-}
-m.set_sync_filters(sync_filters)
-
+m.set_sync_filters({
+    Tracks: {"forward_exclude": "*", "reverse_exclude": "*"},
+    Labels: {"forward_exclude": "contour"},
+})
 ```
-Then add 3D data (e.g. File > Open Sample > napari builtins > Balls (3D)). Activate the labels layer and change the contour value. You should see that the contour property is not synced from main viewer to orthoviews now.
 
-## Screen recording
-The 'Screen recording' tab offers a quick way to save a stitched image of the viewer with its orthogonal views. It is also possible to slide along a given axis and record a movie that is saved as a .avi file.
+### Screen recording
 
-## Known issues and ongoing work
+The **Screen Recorder** tab can save a stitched screenshot or sweep along an axis to produce an AVI video.
+
+## Known issues
+
 - Deprecation warnings on `Window._qt_window`, `LayerList._get_step_size`, `LayerList._get_extent_world` (suppressed for now).
-- After removing the OrthoViewManager with `delete_and_cleanup` (Remove Orthogonal Views command), the canvas may become temporarily unresponsive. Clicking outside of Napari and then back on the Napari window usually fixes this.
+- After removing the OrthoViewManager with `delete_and_cleanup` (Remove Orthogonal Views command), the canvas may become temporarily unresponsive. Clicking outside of napari and back usually fixes this.
 
 ## Contributing
 
-Contributions are very welcome. Tests can be run with [tox], please ensure
-the coverage at least stays the same before you submit a pull request.
+Contributions are very welcome. Tests can be run with [tox]; please ensure coverage at least stays the same before submitting a pull request.
 
 ## License
 
-Distributed under the terms of the [BSD-3] license,
-"napari-orthogonal-views" is free and open source software
+Distributed under the terms of the [BSD-3] license, "napari-orthogonal-views" is free and open source software.
 
 ## Issues
 
@@ -109,16 +119,8 @@ If you encounter any problems, please [file an issue](https://github.com/AnniekS
 
 [napari]: https://github.com/napari/napari
 [copier]: https://copier.readthedocs.io/en/stable/
-[@napari]: https://github.com/napari
-[MIT]: http://opensource.org/licenses/MIT
 [BSD-3]: http://opensource.org/licenses/BSD-3-Clause
-[GNU GPL v3.0]: http://www.gnu.org/licenses/gpl-3.0.txt
-[GNU LGPL v3.0]: http://www.gnu.org/licenses/lgpl-3.0.txt
-[Apache Software License 2.0]: http://www.apache.org/licenses/LICENSE-2.0
-[Mozilla Public License 2.0]: https://www.mozilla.org/media/MPL/2.0/index.txt
 [napari-plugin-template]: https://github.com/napari/napari-plugin-template
-
-[napari]: https://github.com/napari/napari
 [tox]: https://tox.readthedocs.io/en/latest/
 [pip]: https://pypi.org/project/pip/
 [PyPI]: https://pypi.org/
