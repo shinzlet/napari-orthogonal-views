@@ -84,7 +84,7 @@ class OrthoViewManager:
      QMainWindow geometry is preserved.
     """
 
-    def __init__(self, viewer: Viewer, layer1_name: str = "Image 1", layer2_name: str = "Image 2"):
+    def __init__(self, viewer: Viewer, layer1_name: str = "Image 1", layer2_name: str = "Image 2", affine_estimator=None):
         self.viewer = viewer
         self.layer1_name = layer1_name
         self.layer2_name = layer2_name
@@ -157,6 +157,7 @@ class OrthoViewManager:
             viewer=self.viewer,
             layer1_name=self.layer1_name,
             layer2_name=self.layer2_name,
+            affine_estimator=affine_estimator,
         )
 
         # Build orthogonal layout (splitters + widgets)
@@ -787,6 +788,7 @@ def show_point_picker(
     viewer: Viewer,
     layer1_name: str = "Image 1",
     layer2_name: str = "Image 2",
+    affine_estimator=None,
 ) -> OrthoViewManager:
     """Show orthogonal views with the Point Picker tab active.
 
@@ -802,13 +804,17 @@ def show_point_picker(
         Name of the reference image layer.
     layer2_name : str
         Name of the moving image layer.
+    affine_estimator : callable, optional
+        Function with signature ``(source_points, target_points) -> affine``
+        used to estimate the affine transform.  Defaults to
+        ``estimate_affine_from_points`` (full affine with scaling).
 
     Returns
     -------
     OrthoViewManager
         The manager instance, for further programmatic access.
     """
-    m = _get_manager(viewer, layer1_name=layer1_name, layer2_name=layer2_name)
+    m = _get_manager(viewer, layer1_name=layer1_name, layer2_name=layer2_name, affine_estimator=affine_estimator)
 
     def _activate():
         m.show()

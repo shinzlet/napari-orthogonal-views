@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -5,7 +6,6 @@ from napari.viewer import Viewer
 from scipy.ndimage import affine_transform as scipy_affine_transform
 from qtpy.QtCore import Qt, Signal
 from qtpy.QtWidgets import (
-    QCheckBox,
     QHBoxLayout,
     QPushButton,
     QTableWidget,
@@ -46,30 +46,10 @@ class ShowUpdateWidget(QWidget):
         self.setLayout(layout)
 
 
-def estimate_affine_from_points(
-        source_points: np.ndarray, target_points: np.ndarray, allow_scaling: bool
-) -> np.ndarray:
-    """Estimate an affine transform from matched point pairs using least squares.
-
-    Parameters
-    ----------
-    source_points : np.ndarray
-        (N, ndim) array of source coordinates.
-    target_points : np.ndarray
-        (N, ndim) array of target coordinates.
-    allow_scaling: bool
-        If true, the affine matrix uses all DOFs. If false, only shear, rotation, and translation are applied.
-
-    Returns
-    -------
-    np.ndarray
-        (ndim+1, ndim+1) homogeneous affine matrix.
-
-    Raises
-    ------
-    ValueError
-        If fewer than ndim+1 point pairs are provided.
-    """
+def _validate_point_arrays(
+    source_points: np.ndarray, target_points: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Validate and coerce point arrays for affine estimation."""
     source_points = np.asarray(source_points)
     target_points = np.asarray(target_points)
 
@@ -84,16 +64,32 @@ def estimate_affine_from_points(
             f"Need at least {ndim + 1} point pairs for {ndim}D affine estimation, "
             f"got {n}."
         )
-
-    if allow_scaling:
-        return _estimate_affine_with_scaling(source_points, target_points)
-    else:
-        return _estimate_affine_no_scaling(source_points, target_points)
+    return source_points, target_points
 
 
-def _estimate_affine_with_scaling(
+def estimate_affine_from_points(
     source_points: np.ndarray, target_points: np.ndarray
 ) -> np.ndarray:
+    """Estimate a full affine transform (with scaling) from matched point pairs.
+
+    Parameters
+    ----------
+    source_points : np.ndarray
+        (N, ndim) array of source coordinates.
+    target_points : np.ndarray
+        (N, ndim) array of target coordinates.
+
+    Returns
+    -------
+    np.ndarray
+        (ndim+1, ndim+1) homogeneous affine matrix.
+
+    Raises
+    ------
+    ValueError
+        If fewer than ndim+1 point pairs are provided.
+    """
+    source_points, target_points = _validate_point_arrays(source_points, target_points)
     n, ndim = source_points.shape
 
     # Add homogeneous coordinate
@@ -108,7 +104,8 @@ def _estimate_affine_with_scaling(
 
     return affine_matrix
 
-def _estimate_affine_no_scaling(
+
+def estimate_affine_from_points_no_scale(
     source_points: np.ndarray, target_points: np.ndarray
 ) -> np.ndarray:
     """Estimate an affine transform without scaling (diagonal of linear part fixed to 1).
@@ -128,7 +125,13 @@ def _estimate_affine_no_scaling(
     -------
     np.ndarray
         (ndim+1, ndim+1) homogeneous affine matrix with ones on the linear diagonal.
+
+    Raises
+    ------
+    ValueError
+        If fewer than ndim+1 point pairs are provided.
     """
+    source_points, target_points = _validate_point_arrays(source_points, target_points)
     n, ndim = source_points.shape
 
     src_homo = np.hstack([source_points, np.ones((n, 1))])
@@ -159,17 +162,26 @@ class PointPickerWidget(QWidget):
 
     affine_applied = Signal(np.ndarray)
 
-    def __init__(self, viewer: Viewer, layer1_name: str = "Image 1", layer2_name: str = "Image 2"):
+    def __init__(
+        self,
+        viewer: Viewer,
+        layer1_name: str = "Image 1",
+        layer2_name: str = "Image 2",
+        affine_estimator: Callable[[np.ndarray, np.ndarray], np.ndarray] | None = None,
+    ):
         super().__init__()
 
         self.viewer = viewer
         self.layer1_name = layer1_name
         self.layer2_name = layer2_name
+        self.affine_estimator = affine_estimator or estimate_affine_from_points
         self.point_pairs: dict[int, PointPair] = {}  # Use dict for stable pair_id lookup
         self._next_pair_id = 0
         self.transform_snapshot: dict | None = None
         self._applied_affine: np.ndarray | None = None
         self._padding: np.ndarray | None = None
+        self._original_translates: dict[str, np.ndarray] = {}
+        self._translates_captured = False
 
         # Create table
         self.table = QTableWidget()
@@ -194,10 +206,6 @@ class PointPickerWidget(QWidget):
         self.reset_button.clicked.connect(self._reset_transform)
         self.reset_button.setEnabled(False)
 
-        # Scaling checkbox
-        self.allow_scaling_checkbox = QCheckBox("Allow scaling")
-        self.allow_scaling_checkbox.setChecked(False)
-
         # Button layout
         button_layout = QHBoxLayout()
         button_layout.addWidget(self.apply_button)
@@ -207,12 +215,28 @@ class PointPickerWidget(QWidget):
         layout = QVBoxLayout()
         layout.addWidget(self.table)
         layout.addWidget(self.add_button)
-        layout.addWidget(self.allow_scaling_checkbox)
         layout.addLayout(button_layout)
         self.setLayout(layout)
 
+    def _capture_translates(self) -> None:
+        """Read and store the original translate vectors from both layers.
+
+        Called lazily the first time coordinates are needed, since layers may
+        not exist at __init__ time.
+        """
+        if self._translates_captured:
+            return
+        for name in (self.layer1_name, self.layer2_name):
+            if name in self.viewer.layers:
+                self._original_translates[name] = np.array(
+                    self.viewer.layers[name].translate, dtype=float
+                )
+            else:
+                self._original_translates[name] = np.zeros(3)
+        self._translates_captured = True
+
     def _transform_coords(self, coords: tuple, affine: np.ndarray) -> tuple:
-        """Apply a homogeneous affine matrix to step-index coordinates."""
+        """Apply a homogeneous affine matrix to world coordinates."""
         ndim = affine.shape[0] - 1
         p = np.array(coords[:ndim], dtype=float)
         transformed = affine[:ndim, :ndim] @ p + affine[:ndim, ndim]
@@ -268,10 +292,12 @@ class PointPickerWidget(QWidget):
         self._update_button_states()
 
     def _show_coordinate(self, pair_id: int, layer: str) -> None:
-        """Move crosshair to the saved coordinate for the given pair_id and layer."""
+        """Move crosshair to the saved world coordinate for the given pair and layer."""
 
         if pair_id not in self.point_pairs:
             return
+
+        self._capture_translates()
 
         point_pair = self.point_pairs[pair_id]
         coords = (
@@ -281,21 +307,25 @@ class PointPickerWidget(QWidget):
         )
 
         if coords is None:
-            # No coordinate saved yet, default to origin
-            coords = tuple([0] * self.viewer.dims.ndim)
+            # No coordinate saved yet, default to layer's origin in world space
+            layer_name = self.layer1_name if layer == "layer1" else self.layer2_name
+            translate = self._original_translates.get(layer_name, np.zeros(3))
+            coords = tuple(translate.tolist())
 
         if layer == "layer2" and self._applied_affine is not None:
             coords = self._transform_coords(coords, self._applied_affine)
 
-        self.viewer.dims.current_step = coords
+        self.viewer.dims.point = coords
 
     def _update_coordinate(self, pair_id: int, layer: str) -> None:
-        """Save the current crosshair position for the given pair_id and layer."""
+        """Save the current crosshair world position for the given pair and layer."""
 
         if pair_id not in self.point_pairs:
             return
 
-        current_coords = tuple(self.viewer.dims.current_step)
+        self._capture_translates()
+
+        current_coords = tuple(self.viewer.dims.point)
 
         if layer == "layer2" and self._applied_affine is not None:
             inv = np.linalg.inv(self._applied_affine)
@@ -330,19 +360,35 @@ class PointPickerWidget(QWidget):
         # Update button states
         self._update_button_states()
 
-    def _unpad_coords(self, coords: tuple | None) -> tuple | None:
-        """Subtract padding offset from coordinates if padding is active."""
-        if coords is None or self._padding is None:
-            return coords
-        arr = np.array(coords)
-        arr[: len(self._padding)] -= self._padding
+    def _world_to_original_data(self, coords: tuple | None, layer_name: str) -> tuple | None:
+        """Convert world coordinates to the layer's original data coordinates.
+
+        Subtracts the layer's original translate (captured before any padding
+        or affine operations) so the returned value is an index into the
+        original data array.
+        """
+        if coords is None:
+            return None
+        self._capture_translates()
+        translate = self._original_translates.get(layer_name, np.zeros(3))
+        arr = np.array(coords[: len(translate)], dtype=float)
+        arr -= translate
+        return tuple(arr.tolist())
+
+    def _original_data_to_world(self, coords: tuple, layer_name: str) -> tuple:
+        """Convert original data coordinates to world coordinates."""
+        self._capture_translates()
+        translate = self._original_translates.get(layer_name, np.zeros(3))
+        arr = np.array(coords[: len(translate)], dtype=float)
+        arr += translate
         return tuple(arr.tolist())
 
     def get_point_pairs(self) -> dict:
         """Return point pairs as two parallel coordinate lists.
 
-        When padding has been applied, coordinates are returned in the
-        original (unpadded) coordinate space.
+        Coordinates are returned in each layer's original data space
+        (before any padding or affine), matching the format expected by
+        ``load_point_pairs()``.
 
         Returns:
             Dict keyed by layer name, each a list of (z, y, x) tuples.
@@ -352,8 +398,8 @@ class PointPickerWidget(QWidget):
         layer2 = []
         for pair in self.point_pairs.values():
             if pair.layer1_coords is not None and pair.layer2_coords is not None:
-                layer1.append(self._unpad_coords(pair.layer1_coords))
-                layer2.append(self._unpad_coords(pair.layer2_coords))
+                layer1.append(self._world_to_original_data(pair.layer1_coords, self.layer1_name))
+                layer2.append(self._world_to_original_data(pair.layer2_coords, self.layer2_name))
         return {self.layer1_name: layer1, self.layer2_name: layer2}
 
     def clear_pairs(self) -> None:
@@ -370,19 +416,24 @@ class PointPickerWidget(QWidget):
         ----------
         pairs : dict
             Dict keyed by layer name, each a list of (z, y, x) coordinate
-            tuples. Matches the format returned by ``get_point_pairs()``.
+            tuples in each layer's original data space.  Matches the format
+            returned by ``get_point_pairs()``.
         """
+        self._capture_translates()
         self.clear_pairs()
         for l1, l2 in zip(pairs[self.layer1_name], pairs[self.layer2_name]):
             self.add_pair()
             pair_id = self._next_pair_id - 1
             point_pair = self.point_pairs[pair_id]
-            point_pair.layer1_coords = tuple(l1)
-            point_pair.layer2_coords = tuple(l2)
+            point_pair.layer1_coords = self._original_data_to_world(tuple(l1), self.layer1_name)
+            point_pair.layer2_coords = self._original_data_to_world(tuple(l2), self.layer2_name)
         self._update_button_states()
 
     def apply_padding(self, fraction: float) -> None:
         """Pad both image layers with zeros so affine transforms have room to work.
+
+        The layer translate is adjusted to compensate for the padding so that
+        world-space positions remain correct.
 
         Parameters
         ----------
@@ -391,6 +442,9 @@ class PointPickerWidget(QWidget):
         """
         if self.layer1_name not in self.viewer.layers or self.layer2_name not in self.viewer.layers:
             return
+
+        # Ensure original translates are captured before we modify them
+        self._capture_translates()
 
         layer1 = self.viewer.layers[self.layer1_name]
         layer2 = self.viewer.layers[self.layer2_name]
@@ -403,6 +457,11 @@ class PointPickerWidget(QWidget):
         pad_width = [(p, p) for p in pad_amounts]
         layer1.data = np.pad(layer1.data, pad_width, mode="constant")
         layer2.data = np.pad(layer2.data, pad_width, mode="constant")
+
+        # Adjust translate to compensate: data origin shifted by pad_amounts,
+        # so translate must shift back to keep world positions stable.
+        layer1.translate = np.array(layer1.translate, dtype=float) - pad_amounts
+        layer2.translate = np.array(layer2.translate, dtype=float) - pad_amounts
 
         self._padding = pad_amounts
 
@@ -445,8 +504,7 @@ class PointPickerWidget(QWidget):
         src_pts = np.array([p.layer2_coords for p in valid_pairs])
         tgt_pts = np.array([p.layer1_coords for p in valid_pairs])
 
-        allow_scaling = self.allow_scaling_checkbox.isChecked()
-        affine = estimate_affine_from_points(src_pts, tgt_pts, allow_scaling)
+        affine = self.affine_estimator(src_pts, tgt_pts)
 
         return affine
 
@@ -458,11 +516,23 @@ class PointPickerWidget(QWidget):
         slicing — off-diagonal affine components (shear/rotation) are
         stripped in non-displayed dimensions, causing orthoviews to render
         incorrectly.
+
+        The estimated affine maps layer2-world → layer1-world.  To feed
+        scipy (which operates on data arrays) we account for each layer's
+        translate offset:
+
+            d1 = A_lin * (d2 + T2) + A_trans          (forward)
+            d2 = A_lin_inv * d1 - T2 - A_lin_inv * A_trans  (inverse, for scipy)
+
+        After resampling, the output covers layer1's data space, so we set
+        layer2.translate = layer1.translate to align them in world space.
         """
 
         # Check if target layer exists
         if self.layer2_name not in self.viewer.layers:
             return
+
+        self._capture_translates()
 
         layer = self.viewer.layers[self.layer2_name]
 
@@ -471,14 +541,24 @@ class PointPickerWidget(QWidget):
             self.transform_snapshot = {
                 "affine": layer.affine.affine_matrix.copy(),
                 "data": layer.data,
+                "translate": np.array(layer.translate, dtype=float),
             }
 
-        # Compute affine
+        # Compute affine (world-space: layer2-world → layer1-world)
         affine = self._estimate_affine_transform()
         if affine is not None:
-            # Pre-transform the data so the layer can keep an identity affine.
-            inv_affine = np.linalg.inv(affine)
             ndim = affine.shape[0] - 1
+            A_lin = affine[:ndim, :ndim]
+            A_trans = affine[:ndim, ndim]
+            A_lin_inv = np.linalg.inv(A_lin)
+
+            # Layer2's translate (current, possibly padded)
+            T2 = np.array(layer.translate[:ndim], dtype=float)
+
+            # scipy inverse mapping: given output coord d1, compute input d2
+            # d2 = A_lin_inv * d1 - T2 - A_lin_inv * A_trans
+            scipy_matrix = A_lin_inv
+            scipy_offset = -T2 - A_lin_inv @ A_trans
 
             # Use the fixed layer's shape as output so the result covers
             # the reference image's coordinate space.
@@ -491,15 +571,23 @@ class PointPickerWidget(QWidget):
             transformed = scipy_affine_transform(
                 # Affine only works on float data, but we convert back after
                 self.transform_snapshot["data"].astype(np.float32),
-                inv_affine[:ndim, :ndim],
-                offset=inv_affine[:ndim, ndim],
+                scipy_matrix,
+                offset=scipy_offset,
                 output_shape=output_shape,
                 order=1,
             )
             layer.data = transformed.astype(target_dtype)
+
             # Restore original affine (identity in most cases) so no
             # non-orthogonal slicing occurs.
             layer.affine = self.transform_snapshot["affine"]
+
+            # Align layer2 with layer1 in world space — the resampled data
+            # now covers layer1's data-space region.
+            if self.layer1_name in self.viewer.layers:
+                layer.translate = self.viewer.layers[self.layer1_name].translate
+            else:
+                layer.translate = np.zeros(ndim)
 
             self._applied_affine = affine
             self.affine_applied.emit(affine)
@@ -517,32 +605,47 @@ class PointPickerWidget(QWidget):
         layer = self.viewer.layers[self.layer2_name]
         layer.data = self.transform_snapshot["data"]
         layer.affine = self.transform_snapshot["affine"]
+        layer.translate = self.transform_snapshot["translate"]
         self.transform_snapshot = None
         self._applied_affine = None
         self._update_button_states()
 
     def get_estimated_affine(self) -> np.ndarray | None:
-        """Get the estimated affine transform matrix.
+        """Get the estimated affine in original data coordinates.
 
-        When padding has been applied, the affine is conjugated so that it
-        operates in the original (unpadded) coordinate space.
+        The internal affine maps layer2-world → layer1-world.  This method
+        conjugates it so that it operates in each layer's original (unpadded,
+        untranslated) data coordinate space:
+
+            A_data = T1_inv @ A_world @ T2
+
+        where T2 translates by +layer2_original_translate and T1_inv by
+        -layer1_original_translate.
 
         Returns:
             Homogeneous affine matrix or None if insufficient valid pairs.
         """
+        self._capture_translates()
 
         affine = self._estimate_affine_transform()
-        if affine is None or self._padding is None:
+        if affine is None:
             return affine
 
         ndim = affine.shape[0] - 1
-        pad = self._padding[:ndim].astype(float)
 
-        # T_neg translates by -padding, T_pos by +padding
-        T_neg = np.eye(ndim + 1)
-        T_neg[:ndim, ndim] = -pad
+        t1 = self._original_translates.get(self.layer1_name, np.zeros(ndim))[:ndim]
+        t2 = self._original_translates.get(self.layer2_name, np.zeros(ndim))[:ndim]
 
-        T_pos = np.eye(ndim + 1)
-        T_pos[:ndim, ndim] = pad
+        # If both translates are zero (no offset), skip conjugation
+        if np.allclose(t1, 0) and np.allclose(t2, 0):
+            return affine
 
-        return T_neg @ affine @ T_pos
+        # T2 translates by +layer2_translate (data→world)
+        T2 = np.eye(ndim + 1)
+        T2[:ndim, ndim] = t2
+
+        # T1_inv translates by -layer1_translate (world→data)
+        T1_inv = np.eye(ndim + 1)
+        T1_inv[:ndim, ndim] = -t1
+
+        return T1_inv @ affine @ T2
