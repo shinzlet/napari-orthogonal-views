@@ -47,7 +47,7 @@ class ShowUpdateWidget(QWidget):
 
 
 def estimate_affine_from_points(
-    source_points: np.ndarray, target_points: np.ndarray
+        source_points: np.ndarray, target_points: np.ndarray, allow_scaling: bool
 ) -> np.ndarray:
     """Estimate an affine transform from matched point pairs using least squares.
 
@@ -57,6 +57,8 @@ def estimate_affine_from_points(
         (N, ndim) array of source coordinates.
     target_points : np.ndarray
         (N, ndim) array of target coordinates.
+    allow_scaling: bool
+        If true, the affine matrix uses all DOFs. If false, only shear, rotation, and translation are applied.
 
     Returns
     -------
@@ -83,6 +85,17 @@ def estimate_affine_from_points(
             f"got {n}."
         )
 
+    if allow_scaling:
+        return _estimate_affine_with_scaling(source_points, target_points)
+    else:
+        return _estimate_affine_no_scaling(source_points, target_points)
+
+
+def _estimate_affine_with_scaling(
+    source_points: np.ndarray, target_points: np.ndarray
+) -> np.ndarray:
+    n, ndim = source_points.shape
+
     # Add homogeneous coordinate
     src_homo = np.hstack([source_points, np.ones((n, 1))])
 
@@ -95,8 +108,7 @@ def estimate_affine_from_points(
 
     return affine_matrix
 
-
-def estimate_affine_no_scaling(
+def _estimate_affine_no_scaling(
     source_points: np.ndarray, target_points: np.ndarray
 ) -> np.ndarray:
     """Estimate an affine transform without scaling (diagonal of linear part fixed to 1).
@@ -117,20 +129,7 @@ def estimate_affine_no_scaling(
     np.ndarray
         (ndim+1, ndim+1) homogeneous affine matrix with ones on the linear diagonal.
     """
-    source_points = np.asarray(source_points)
-    target_points = np.asarray(target_points)
-
-    if source_points.ndim != 2 or target_points.ndim != 2:
-        raise ValueError("Point arrays must be 2-dimensional (N, ndim).")
-    if source_points.shape != target_points.shape:
-        raise ValueError("Source and target point arrays must have the same shape.")
-
     n, ndim = source_points.shape
-    if n < ndim + 1:
-        raise ValueError(
-            f"Need at least {ndim + 1} point pairs for {ndim}D affine estimation, "
-            f"got {n}."
-        )
 
     src_homo = np.hstack([source_points, np.ones((n, 1))])
     affine_matrix = np.eye(ndim + 1)
@@ -446,10 +445,8 @@ class PointPickerWidget(QWidget):
         src_pts = np.array([p.layer2_coords for p in valid_pairs])
         tgt_pts = np.array([p.layer1_coords for p in valid_pairs])
 
-        if self.allow_scaling_checkbox.isChecked():
-            affine = estimate_affine_from_points(src_pts, tgt_pts)
-        else:
-            affine = estimate_affine_no_scaling(src_pts, tgt_pts)
+        allow_scaling = self.allow_scaling_checkbox.isChecked()
+        affine = estimate_affine_from_points(src_pts, tgt_pts, allow_scaling)
 
         return affine
 
