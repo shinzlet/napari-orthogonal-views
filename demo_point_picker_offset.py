@@ -25,7 +25,7 @@ N = 100
 shape = (200, 200, 200)
 # The offset does not have to be positive in general, but for this demo my
 # math assumes it is
-true_offset = np.random.randint(40, 80, size=3)
+true_offset = np.random.randint(5, 40, size=3)
 initial_offset = true_offset + np.random.randint(-5, 5, size=3)
 
 image1 = np.zeros(shape)

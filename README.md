@@ -38,6 +38,41 @@ viewer.add_image(moving, name="Moving", colormap="magenta", blending="additive")
 manager = show_point_picker(viewer, layer1_name="Fixed", layer2_name="Moving")
 ```
 
+### Translation offsets
+
+If your two images are offset by a known coarse translation, set `translate` on the moving layer when adding it to the viewer. The point picker uses napari's `layer.translate` property to render the images at their true world-space positions without allocating a large zero-padded bounding box:
+
+```python
+offset = np.array([50, 30, 20])  # (z, y, x) offset of moving image
+viewer.add_image(moving, name="Moving", colormap="magenta",
+                 blending="additive", translate=offset)
+```
+
+Layer 1's `(0, 0, 0)` is treated as the global origin. When the affine is applied, the output is automatically sized to the bounding box of the transformed moving image, so no data is clipped.
+
+### Custom affine estimator
+
+By default, `show_point_picker` uses `estimate_affine_from_points`, which estimates a full affine (rotation, shear, scale, and translation). You can pass a custom estimator function with the signature `(source_points: ndarray, target_points: ndarray) -> ndarray` (returning a homogeneous affine matrix):
+
+```python
+from napari_orthogonal_views import (
+    show_point_picker,
+    estimate_affine_from_points_no_scale,
+)
+
+manager = show_point_picker(
+    viewer, layer1_name="Fixed", layer2_name="Moving",
+    affine_estimator=estimate_affine_from_points_no_scale,
+)
+```
+
+Built-in estimators:
+
+| Function | Description |
+|----------|-------------|
+| `estimate_affine_from_points` | Full affine with all degrees of freedom (default) |
+| `estimate_affine_from_points_no_scale` | Constrains the diagonal to 1 — only shear, rotation, and translation |
+
 ### Workflow
 
 1. Click **Add new pair** to create a new correspondence row.
@@ -47,22 +82,24 @@ manager = show_point_picker(viewer, layer1_name="Fixed", layer2_name="Moving")
 5. Find the same feature in the moving image and click **Update** in the moving-image column.
 6. Repeat until you have at least 4 pairs (more is better).
 7. Click **Apply Estimated Affine** to transform the moving image to match the fixed image.
+8. You can add more pairs and re-apply — the transform is re-estimated from all pairs each time.
+9. Click **Reset Transform** to restore the original data and position.
 
 ### Programmatic access
 
 ```python
-# Retrieve point pairs (dict keyed by layer name)
+# Retrieve point pairs (dict keyed by layer name, in each layer's data space)
 pairs = manager.get_registration_points()
 # {"Fixed": [(z,y,x), ...], "Moving": [(z,y,x), ...]}
 
-# Get the estimated affine matrix (4x4 homogeneous for 3D)
+# Get the estimated affine matrix (4x4 homogeneous for 3D, in data coordinates)
 affine = manager.get_estimated_affine()
 
-# Load previously saved point pairs
+# Load previously saved point pairs (in data-space coordinates)
 manager.load_registration_points(pairs)
 ```
 
-See `demo_point_picker.py` for a complete runnable example with synthetic data.
+See `demo_point_picker.py` for a basic example and `demo_point_picker_offset.py` for an example with a translation offset.
 
 ## Orthogonal views
 

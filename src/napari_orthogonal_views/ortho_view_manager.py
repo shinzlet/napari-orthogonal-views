@@ -318,16 +318,6 @@ class OrthoViewManager:
 
         return self.point_picker_widget.get_estimated_affine()
 
-    def apply_padding(self, fraction: float) -> None:
-        """Pad both image layers with zeros so affine transforms have room to work.
-
-        Parameters
-        ----------
-        fraction : float
-            Fraction of the (element-wise) maximum shape to pad on each side.
-        """
-        self.point_picker_widget.apply_padding(fraction)
-
     def set_show_orth_views(self, show: bool) -> None:
         """Show or hide ortho views."""
 

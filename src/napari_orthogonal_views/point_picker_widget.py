@@ -1,3 +1,4 @@
+import itertools
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -179,7 +180,6 @@ class PointPickerWidget(QWidget):
         self._next_pair_id = 0
         self.transform_snapshot: dict | None = None
         self._applied_affine: np.ndarray | None = None
-        self._padding: np.ndarray | None = None
         self._original_translates: dict[str, np.ndarray] = {}
         self._translates_captured = False
 
@@ -241,7 +241,7 @@ class PointPickerWidget(QWidget):
         p = np.array(coords[:ndim], dtype=float)
         transformed = affine[:ndim, :ndim] @ p + affine[:ndim, ndim]
         result = list(coords)  # preserve any extra dims unchanged
-        result[:ndim] = np.round(transformed).astype(int).tolist()
+        result[:ndim] = transformed.tolist()
         return tuple(result)
 
     def add_pair(self) -> None:
@@ -429,42 +429,6 @@ class PointPickerWidget(QWidget):
             point_pair.layer2_coords = self._original_data_to_world(tuple(l2), self.layer2_name)
         self._update_button_states()
 
-    def apply_padding(self, fraction: float) -> None:
-        """Pad both image layers with zeros so affine transforms have room to work.
-
-        The layer translate is adjusted to compensate for the padding so that
-        world-space positions remain correct.
-
-        Parameters
-        ----------
-        fraction : float
-            Fraction of the (element-wise) maximum shape to pad on each side.
-        """
-        if self.layer1_name not in self.viewer.layers or self.layer2_name not in self.viewer.layers:
-            return
-
-        # Ensure original translates are captured before we modify them
-        self._capture_translates()
-
-        layer1 = self.viewer.layers[self.layer1_name]
-        layer2 = self.viewer.layers[self.layer2_name]
-
-        shape1 = np.array(layer1.data.shape)
-        shape2 = np.array(layer2.data.shape)
-        pad_amounts = np.maximum(shape1, shape2) * fraction
-        pad_amounts = np.round(pad_amounts).astype(int)
-
-        pad_width = [(p, p) for p in pad_amounts]
-        layer1.data = np.pad(layer1.data, pad_width, mode="constant")
-        layer2.data = np.pad(layer2.data, pad_width, mode="constant")
-
-        # Adjust translate to compensate: data origin shifted by pad_amounts,
-        # so translate must shift back to keep world positions stable.
-        layer1.translate = np.array(layer1.translate, dtype=float) - pad_amounts
-        layer2.translate = np.array(layer2.translate, dtype=float) - pad_amounts
-
-        self._padding = pad_amounts
-
     def _update_button_states(self) -> None:
         """Update the enabled state of the Apply and Reset buttons."""
 
@@ -517,15 +481,10 @@ class PointPickerWidget(QWidget):
         stripped in non-displayed dimensions, causing orthoviews to render
         incorrectly.
 
-        The estimated affine maps layer2-world → layer1-world.  To feed
-        scipy (which operates on data arrays) we account for each layer's
-        translate offset:
-
-            d1 = A_lin * (d2 + T2) + A_trans          (forward)
-            d2 = A_lin_inv * d1 - T2 - A_lin_inv * A_trans  (inverse, for scipy)
-
-        After resampling, the output covers layer1's data space, so we set
-        layer2.translate = layer1.translate to align them in world space.
+        The output array is sized to fit the axis-aligned bounding box of
+        layer2's transformed corners, so no image data is clipped.  The
+        layer's translate is set to the bounding box origin so that the
+        result sits at the correct world-space position.
         """
 
         # Check if target layer exists
@@ -552,24 +511,32 @@ class PointPickerWidget(QWidget):
             A_trans = affine[:ndim, ndim]
             A_lin_inv = np.linalg.inv(A_lin)
 
-            # Layer2's translate (current, possibly padded)
-            T2 = np.array(layer.translate[:ndim], dtype=float)
+            # Layer2's original translate (not current — current may be bbox_min
+            # from a previous application)
+            T2 = self.transform_snapshot["translate"][:ndim]
+            data_shape = np.array(self.transform_snapshot["data"].shape[:ndim], dtype=float)
 
-            # scipy inverse mapping: given output coord d1, compute input d2
-            # d2 = A_lin_inv * d1 - T2 - A_lin_inv * A_trans
+            # Build the 2^ndim corners of layer2 in world space
+            corners_data = np.array(list(itertools.product(*[(0, s) for s in data_shape])))
+            corners_world = corners_data + T2
+
+            # Transform corners through the affine (layer2-world → layer1-world)
+            corners_transformed = (A_lin @ corners_world.T).T + A_trans
+
+            # Axis-aligned bounding box of the transformed volume
+            bbox_min = np.floor(corners_transformed.min(axis=0)).astype(int)
+            bbox_max = np.ceil(corners_transformed.max(axis=0)).astype(int)
+            output_shape = tuple((bbox_max - bbox_min).tolist())
+
+            # scipy inverse mapping: output index o → world w = o + bbox_min
+            # then world → layer2-data: d2 = A_lin_inv @ (w - A_trans) - T2
+            # combined: d2 = A_lin_inv @ (o + bbox_min - A_trans) - T2
+            #         = A_lin_inv @ o + A_lin_inv @ (bbox_min - A_trans) - T2
             scipy_matrix = A_lin_inv
-            scipy_offset = -T2 - A_lin_inv @ A_trans
-
-            # Use the fixed layer's shape as output so the result covers
-            # the reference image's coordinate space.
-            if self.layer1_name in self.viewer.layers:
-                output_shape = self.viewer.layers[self.layer1_name].data.shape
-            else:
-                output_shape = self.transform_snapshot["data"].shape
+            scipy_offset = A_lin_inv @ (bbox_min.astype(float) - A_trans) - T2
 
             target_dtype = self.transform_snapshot["data"].dtype
             transformed = scipy_affine_transform(
-                # Affine only works on float data, but we convert back after
                 self.transform_snapshot["data"].astype(np.float32),
                 scipy_matrix,
                 offset=scipy_offset,
@@ -582,12 +549,8 @@ class PointPickerWidget(QWidget):
             # non-orthogonal slicing occurs.
             layer.affine = self.transform_snapshot["affine"]
 
-            # Align layer2 with layer1 in world space — the resampled data
-            # now covers layer1's data-space region.
-            if self.layer1_name in self.viewer.layers:
-                layer.translate = self.viewer.layers[self.layer1_name].translate
-            else:
-                layer.translate = np.zeros(ndim)
+            # Place the output at the bounding box origin in world space
+            layer.translate = bbox_min.astype(float)
 
             self._applied_affine = affine
             self.affine_applied.emit(affine)
