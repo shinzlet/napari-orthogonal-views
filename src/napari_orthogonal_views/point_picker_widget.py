@@ -3,11 +3,15 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
+from napari.utils.notifications import show_warning
 from napari.viewer import Viewer
 from scipy.ndimage import affine_transform as scipy_affine_transform
 from qtpy.QtCore import Qt, Signal
 from qtpy.QtWidgets import (
+    QDoubleSpinBox,
+    QGroupBox,
     QHBoxLayout,
+    QLabel,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -182,6 +186,8 @@ class PointPickerWidget(QWidget):
         self._applied_affine: np.ndarray | None = None
         self._original_translates: dict[str, np.ndarray] = {}
         self._translates_captured = False
+        self._nudge_offset = np.zeros(3)
+        self._affine_base_translate: np.ndarray | None = None
 
         # Create table
         self.table = QTableWidget()
@@ -211,10 +217,33 @@ class PointPickerWidget(QWidget):
         button_layout.addWidget(self.apply_button)
         button_layout.addWidget(self.reset_button)
 
+        # Nudge offset controls
+        nudge_group = QGroupBox("Nudge Offset")
+        nudge_layout = QVBoxLayout()
+        nudge_spin_layout = QHBoxLayout()
+        self._nudge_spins = []
+        for axis_label in ("Z", "Y", "X"):
+            label = QLabel(axis_label)
+            spin = QDoubleSpinBox()
+            spin.setRange(-10000, 10000)
+            spin.setSingleStep(1.0)
+            spin.setDecimals(1)
+            spin.setValue(0.0)
+            spin.valueChanged.connect(self._apply_nudge)
+            nudge_spin_layout.addWidget(label)
+            nudge_spin_layout.addWidget(spin)
+            self._nudge_spins.append(spin)
+        nudge_layout.addLayout(nudge_spin_layout)
+        self._reset_nudge_button = QPushButton("Reset Nudge")
+        self._reset_nudge_button.clicked.connect(self._reset_nudge)
+        nudge_layout.addWidget(self._reset_nudge_button)
+        nudge_group.setLayout(nudge_layout)
+
         # Main layout
         layout = QVBoxLayout()
         layout.addWidget(self.table)
         layout.addWidget(self.add_button)
+        layout.addWidget(nudge_group)
         layout.addLayout(button_layout)
         self.setLayout(layout)
 
@@ -243,6 +272,44 @@ class PointPickerWidget(QWidget):
         result = list(coords)  # preserve any extra dims unchanged
         result[:ndim] = transformed.tolist()
         return tuple(result)
+
+    def _get_base_translate(self) -> np.ndarray:
+        """Return what layer2.translate would be without the nudge offset."""
+        if self._affine_base_translate is not None:
+            return self._affine_base_translate.copy()
+        self._capture_translates()
+        return self._original_translates.get(self.layer2_name, np.zeros(3)).copy()
+
+    def _update_layer2_translate(self) -> None:
+        """Set layer2.translate to base + nudge_offset."""
+        if self.layer2_name not in self.viewer.layers:
+            return
+        layer = self.viewer.layers[self.layer2_name]
+        base = self._get_base_translate()
+        layer.translate = base + self._nudge_offset
+
+    def _apply_nudge(self) -> None:
+        """Called when any nudge spinbox value changes."""
+        self._capture_translates()
+        self._nudge_offset = np.array(
+            [spin.value() for spin in self._nudge_spins]
+        )
+        self._update_layer2_translate()
+
+    def _reset_nudge(self) -> None:
+        """Reset all nudge spinboxes to zero."""
+        for spin in self._nudge_spins:
+            spin.blockSignals(True)
+            spin.setValue(0.0)
+            spin.blockSignals(False)
+        self._nudge_offset = np.zeros(3)
+        self._reset_nudge_button.setStyleSheet("")
+        self._update_layer2_translate()
+
+    def cleanup_nudge(self) -> None:
+        """Reset the nudge offset and restore layer2.translate to its base value."""
+        if not np.allclose(self._nudge_offset, 0):
+            self._reset_nudge()
 
     def add_pair(self) -> None:
         """Add a new point pair row to the table."""
@@ -312,8 +379,11 @@ class PointPickerWidget(QWidget):
             translate = self._original_translates.get(layer_name, np.zeros(3))
             coords = tuple(translate.tolist())
 
-        if layer == "layer2" and self._applied_affine is not None:
-            coords = self._transform_coords(coords, self._applied_affine)
+        if layer == "layer2":
+            if self._applied_affine is not None:
+                coords = self._transform_coords(coords, self._applied_affine)
+            if not np.allclose(self._nudge_offset, 0):
+                coords = tuple((np.array(coords) + self._nudge_offset).tolist())
 
         self.viewer.dims.point = coords
 
@@ -327,9 +397,14 @@ class PointPickerWidget(QWidget):
 
         current_coords = tuple(self.viewer.dims.point)
 
-        if layer == "layer2" and self._applied_affine is not None:
-            inv = np.linalg.inv(self._applied_affine)
-            current_coords = self._transform_coords(current_coords, inv)
+        if layer == "layer2":
+            if not np.allclose(self._nudge_offset, 0):
+                current_coords = tuple(
+                    (np.array(current_coords) - self._nudge_offset).tolist()
+                )
+            if self._applied_affine is not None:
+                inv = np.linalg.inv(self._applied_affine)
+                current_coords = self._transform_coords(current_coords, inv)
 
         point_pair = self.point_pairs[pair_id]
 
@@ -500,7 +575,7 @@ class PointPickerWidget(QWidget):
             self.transform_snapshot = {
                 "affine": layer.affine.affine_matrix.copy(),
                 "data": layer.data,
-                "translate": np.array(layer.translate, dtype=float),
+                "translate": np.array(layer.translate, dtype=float) - self._nudge_offset,
             }
 
         # Compute affine (world-space: layer2-world → layer1-world)
@@ -549,12 +624,24 @@ class PointPickerWidget(QWidget):
             # non-orthogonal slicing occurs.
             layer.affine = self.transform_snapshot["affine"]
 
-            # Place the output at the bounding box origin in world space
-            layer.translate = bbox_min.astype(float)
+            # Place the output at the bounding box origin in world space,
+            # preserving any active nudge offset.
+            self._affine_base_translate = bbox_min.astype(float)
+            layer.translate = self._affine_base_translate + self._nudge_offset
 
             self._applied_affine = affine
             self.affine_applied.emit(affine)
             self._update_button_states()
+
+            if not np.allclose(self._nudge_offset, 0):
+                self._reset_nudge_button.setStyleSheet(
+                    "QPushButton { background-color: #c0392b; color: white; }"
+                )
+                show_warning(
+                    "Affine applied while nudge is active. "
+                    "Consider resetting the nudge offset to see the "
+                    "aligned result without the extra translation."
+                )
 
     def _reset_transform(self) -> None:
         """Reset the transform of the moving layer to the snapshot state."""
@@ -568,9 +655,10 @@ class PointPickerWidget(QWidget):
         layer = self.viewer.layers[self.layer2_name]
         layer.data = self.transform_snapshot["data"]
         layer.affine = self.transform_snapshot["affine"]
-        layer.translate = self.transform_snapshot["translate"]
+        layer.translate = self.transform_snapshot["translate"] + self._nudge_offset
         self.transform_snapshot = None
         self._applied_affine = None
+        self._affine_base_translate = None
         self._update_button_states()
 
     def get_estimated_affine(self) -> np.ndarray | None:

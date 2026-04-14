@@ -720,6 +720,9 @@ class OrthoViewManager:
                 splitter.splitterMoved.disconnect(handler)
         self._splitter_handlers.clear()
 
+        # Restore layer2 translate if nudge is active
+        self.point_picker_widget.cleanup_nudge()
+
         # Delete the extra widgets if still there
         for w in (
             self.right_widget,
